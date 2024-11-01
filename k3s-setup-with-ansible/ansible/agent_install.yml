@@ -1,0 +1,53 @@
+- name: Gather K3s Token and IP from Master
+  hosts: K3s_Master  # Master group from inventory
+  gather_facts: true
+  tasks:
+    - name: Get K3s node token
+      become: true
+      ansible.builtin.command: cat /var/lib/rancher/k3s/server/node-token
+      register: master_token
+      changed_when: false  # Prevent marking as changed
+
+    - name: Get Master IP Address
+      ansible.builtin.set_fact:
+        master_ip: "{{ ansible_default_ipv4.address }}"  # Get the master IP address
+
+    - name: Add master details to hostvars for agent
+      ansible.builtin.add_host:
+        name: "{{ groups['K3s_Agent'][0] }}"  # Reference the agent node dynamically
+        master_ip: "{{ master_ip }}"
+        master_token: "{{ master_token.stdout }}"
+
+    - name: Debug Master IP
+      ansible.builtin.debug:
+        var: master_ip
+
+- name: Install K3s Agent on Agent Node
+  hosts: K3s_Agent  # Agent group from inventory
+  gather_facts: true
+  tasks:
+    - name: Install k3s agent
+      become: true
+      ansible.builtin.shell: |
+        set -o pipefail
+        curl -sfL https://get.k3s.io | K3S_URL=https://{{ hostvars["master"].master_ip }}:6443 \
+        K3S_TOKEN={{ hostvars["master"].master_token.stdout }} sh - > /tmp/k3s_agent_install.log 2>&1
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+- name: Configure Master for Agent Access
+  hosts: K3s_Master  # Master group from inventory
+  tasks:
+    - name: Restart K3s Service
+      become: true
+      ansible.builtin.systemd:
+        name: k3s
+        state: restarted
+        enabled: true
+
+    - name: Set kubeconfig permissions
+      become: true
+      ansible.builtin.file:
+        path: /etc/rancher/k3s/k3s.yaml
+        mode: '0644'

@@ -1,0 +1,7 @@
+---
+- name: Test connectivity to K3s Agent
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Ping the host
+      ansible.builtin.ping:

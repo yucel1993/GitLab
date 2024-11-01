@@ -1,0 +1,120 @@
+stages:
+  - test
+  - terraform_init
+  - terraform_apply
+  - ansible_install_agent
+  - terraform_destroy  # Added destroy stage
+
+variables:
+  AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID  # Pull from GitLab CI/CD variables
+  AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY  # Pull from GitLab CI/CD variables
+  AWS_DEFAULT_REGION: "us-east-1"  # Default AWS region
+  TF_VAR_ssh_key_name: "amazon"  # Key name without .pem extension
+  ANSIBLE_CONFIG: "ansible/ansible.cfg"
+# images
+.terraform-image:
+  image: 
+    name: hashicorp/terraform:light
+    entrypoint: [""]
+.ansible-image:
+  image: 
+    name: alpine/ansible:latest
+    entrypoint: [""]
+
+.ansible-lint-image:
+  image: 
+    name: pipelinecomponents/ansible-lint:edge
+    entrypoint: [""]
+
+# TEST
+ansible-lint:
+  extends: .ansible-lint-image
+  stage: test
+  script:
+    - ansible-lint ansible/*.yml
+
+terraform-lint:
+  extends: .terraform-image
+  stage: test
+  before_script:
+    - cd terraform
+    - terraform fmt  # Automatically format Terraform files
+  script:
+    - terraform init  # Initialize Terraform to install required providers
+    - terraform fmt -check -diff -recursive  # Check formatting and show differences
+    - terraform validate  # Validate the Terraform configuration
+
+
+
+#  TERRAFORM INIT
+terraform_init:
+  stage: terraform_init
+  extends: .terraform-image
+  script:
+    - cd terraform  # Navigate to the terraform directory
+    - echo "Initializing Terraform..."
+    - terraform init  # Initialize Terraform
+
+terraform_apply:
+  stage: terraform_apply
+  extends: .terraform-image
+  when: manual
+  only:
+    - dev
+    - main
+  script:
+    - cd terraform
+    - echo "Applying Terraform..."
+    - terraform init
+    - terraform apply -auto-approve
+    - export MASTER_IP=$(terraform output -raw master_ip)
+    - export AGENT_IP=$(terraform output -raw agent_ip)
+    - export PRIVATE_KEY=$(terraform output -raw private_key)
+    - echo "$PRIVATE_KEY" > ../ansible/ansible_key.pem
+    - chmod 600 ../ansible/ansible_key.pem
+    - sed -i "s|MASTER_IP_HERE|$MASTER_IP|" ../ansible/hosts.ini
+    - sed -i "s|AGENT_IP_HERE|$AGENT_IP|" ../ansible/hosts.ini
+
+  artifacts:
+    paths:
+      - terraform/terraform.tfstate      # Save the Terraform state file
+      - terraform/terraform.tfstate.backup
+      - ansible/hosts.ini
+      - ansible/ansible_key.pem
+        # Optionally save the backup state file
+    expire_in: 1 hour  # Optional: Set expiration for the artifacts
+    
+
+ansible_install_agent:
+  stage: ansible_install_agent
+  extends: .ansible-image
+  when: manual
+  only:
+    - dev
+    - main
+  dependencies:
+    - terraform_apply  # Depend on output from apply stage
+  script:
+    - cd ansible
+    - chmod o-w .  # Remove world-writable permission from the directory
+    - ansible --version
+    - ls -al
+    - cat hosts.ini
+    - cat ansible.cfg  # Display the ansible.cfg content
+    - ansible-playbook -i hosts.ini ping.yml
+    - ansible-playbook -i hosts.ini agent_install.yml
+
+terraform_destroy:
+  stage: terraform_destroy
+  extends: .terraform-image
+  when: manual
+  only:
+    - dev
+    - main  # Only runs on dev and main branches
+  dependencies:
+    - terraform_apply  # Ensures state file is available
+  script:
+    - cd terraform  # Navigate to the terraform directory
+    - echo "Destroying Terraform resources..."
+    - terraform init
+    - terraform destroy -auto-approve  # Destroy all resources managed by Terraform
